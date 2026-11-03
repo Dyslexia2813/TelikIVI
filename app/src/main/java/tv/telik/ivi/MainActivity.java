@@ -54,7 +54,8 @@ import java.util.regex.Pattern;
  * - Arrows move a mouse pointer, OK clicks. Pushing the pointer against a screen edge scrolls the page
  *   (or a row of posters) that way.
  * - Back goes back in the site's history; on the first page it exits.
- * - Menu shows a diagnostics line (versions, current address, last script errors).
+ * - A USB/wireless mouse works as usual; the remote's pointer then jumps to where the mouse is.
+ * - Menu shows diagnostics (versions, address, script and network errors, what the video player can do).
  * - The box's 2016 browser lacks newer JavaScript functions: a small polyfill script is put in front of
  *   every ivi page before the site's own scripts run.
  * - Video can go full screen; login cookies are kept between runs; the last page opens again on start.
@@ -166,6 +167,24 @@ public class MainActivity extends Activity {
         return getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST, HOME_URL);
     }
 
+    // ---------------------------------------------------------------- mouse
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent ev) {
+        if (isMouse(ev)) pointer.followMouse(ev.getX(), ev.getY());
+        return super.dispatchGenericMotionEvent(ev);
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (isMouse(ev)) pointer.followMouse(ev.getX(), ev.getY());
+        return super.dispatchTouchEvent(ev);
+    }
+
+    private static boolean isMouse(MotionEvent ev) {
+        return ev.isFromSource(InputDevice.SOURCE_MOUSE);
+    }
+
     // ---------------------------------------------------------------- remote control
 
     @Override
@@ -236,6 +255,17 @@ public class MainActivity extends Activity {
             edge.setStyle(Paint.Style.STROKE);
             edge.setStrokeWidth(2 * d);
             setWillNotDraw(false);
+            setClickable(false);
+            setFocusable(false);
+            setVisibility(View.INVISIBLE);
+        }
+
+        /** A real mouse is in use: hide the remote's pointer (the system draws its own), remember the spot. */
+        void followMouse(float mx, float my) {
+            x = mx;
+            y = my;
+            main.removeCallbacks(autoHide);
+            setVisibility(View.INVISIBLE);
         }
 
         private void center() {
@@ -369,6 +399,7 @@ public class MainActivity extends Activity {
 
         @Override
         public void onPageFinished(WebView view, String url) {
+            evalJs(JS_WIDEVINE_CHECK);
             if (url != null && url.startsWith("http")) {
                 getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LAST, url).apply();
             }
@@ -384,7 +415,14 @@ public class MainActivity extends Activity {
 
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-            if (request.isForMainFrame()) noteError("страница: " + error.getErrorCode() + " " + error.getDescription());
+            noteError((request.isForMainFrame() ? "страница: " : "сеть: ") + error.getErrorCode() + " "
+                    + error.getDescription() + " " + shortUrl(request.getUrl().toString()));
+        }
+
+        @Override
+        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+            // Refused requests (e.g. the player's API or video server) say a lot about why video doesn't start.
+            noteError("HTTP " + response.getStatusCode() + " " + shortUrl(request.getUrl().toString()));
         }
 
         @Override
@@ -568,14 +606,63 @@ public class MainActivity extends Activity {
             String s = e.length() > 200 ? e.substring(0, 200) : e;
             s = String.format(java.util.Locale.US, "%tR ", new java.util.Date()) + s;
             lastErrors.addFirst(s);
-            while (lastErrors.size() > 4) lastErrors.removeLast();
+            if (lastErrors.size() > 1 && lastErrors.get(1).substring(6).equals(s.substring(6))) {
+                lastErrors.remove(1); // same error again: keep only the newest
+            }
+            while (lastErrors.size() > 7) lastErrors.removeLast();
             if (diag.getVisibility() == View.VISIBLE) showDiag();
         });
     }
 
     private void toggleDiag() {
-        if (diag.getVisibility() == View.VISIBLE) diag.setVisibility(View.GONE);
-        else showDiag();
+        if (diag.getVisibility() == View.VISIBLE) {
+            diag.setVisibility(View.GONE);
+            main.removeCallbacks(diagRefresh);
+        } else {
+            showDiag();
+        }
+    }
+
+    /** While diagnostics are open, ask the page every 2 s what its video player is doing. */
+    private final Runnable diagRefresh = new Runnable() {
+        @Override
+        public void run() {
+            if (diag.getVisibility() != View.VISIBLE) return;
+            if (web != null) {
+                web.evaluateJavascript(JS_PROBE, v -> {
+                    if (v != null && v.length() > 2 && v.startsWith("\"")) {
+                        probe = v.substring(1, v.length() - 1).replace("\\\"", "\"");
+                    }
+                    if (diag.getVisibility() == View.VISIBLE) showDiag();
+                });
+            }
+            main.postDelayed(this, 2_000);
+        }
+    };
+
+    private String probe = "-";
+
+    /** Asks the protected-video system once per page whether Widevine works; the answer is read by JS_PROBE. */
+    private static final String JS_WIDEVINE_CHECK = "(function(){try{if(window.__tkwv)return;window.__tkwv='проверка';"
+            + "if(!navigator.requestMediaKeySystemAccess){window.__tkwv='нет EME';return;}"
+            + "navigator.requestMediaKeySystemAccess('com.widevine.alpha',[{initDataTypes:['cenc'],"
+            + "videoCapabilities:[{contentType:'video/mp4; codecs=\"avc1.42E01E\"'}]}])"
+            + ".then(function(){window.__tkwv='есть';},function(e){window.__tkwv='нет ('+e.name+')';});"
+            + "}catch(e){window.__tkwv='ошибка '+e;}})()";
+
+    /** What the page's video elements and the browser's media features look like right now. */
+    private static final String JS_PROBE = "(function(){var r=[];try{"
+            + "r.push('MSE '+(window.MediaSource?(MediaSource.isTypeSupported('video/mp4; codecs=\"avc1.640028\"')?'да':'без H.264'):'нет'));"
+            + "r.push('Widevine '+(window.__tkwv||'?'));"
+            + "var v=document.querySelectorAll('video');r.push('video: '+v.length);"
+            + "for(var i=0;i<v.length&&i<3;i++){var x=v[i];r.push('['+(x.paused?'пауза':'идёт')+' готов'+x.readyState"
+            + "+' сеть'+x.networkState+(x.error?' ОШИБКА '+x.error.code+' '+(x.error.message||''):'')"
+            + "+' '+String(x.currentSrc||'').slice(0,50)+']');}"
+            + "r.push('iframe: '+document.querySelectorAll('iframe').length);"
+            + "}catch(e){r.push('проба: '+e);}return r.join(' · ');})()";
+
+    private static String shortUrl(String u) {
+        return u.length() > 90 ? u.substring(0, 90) + "…" : u;
     }
 
     private void showDiag() {
@@ -591,9 +678,14 @@ public class MainActivity extends Activity {
                 + " · WebView " + chrome
                 + "\nАдрес: " + url
                 + " · исправлено страниц: " + patchedPages
+                + "\nПлеер: " + probe
                 + "\nОшибки: " + (lastErrors.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", lastErrors))
                 + "\n(Menu или Назад закрывает)");
-        diag.setVisibility(View.VISIBLE);
+        if (diag.getVisibility() != View.VISIBLE) {
+            diag.setVisibility(View.VISIBLE);
+            main.removeCallbacks(diagRefresh);
+            main.post(diagRefresh);
+        }
     }
 
     private static FrameLayout.LayoutParams matchParent() {
