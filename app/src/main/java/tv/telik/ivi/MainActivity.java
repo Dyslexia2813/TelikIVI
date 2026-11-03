@@ -58,11 +58,12 @@ import java.util.regex.Pattern;
  * - Menu shows diagnostics (versions, address, script and network errors, what the video player can do).
  * - The box's 2016 browser lacks newer JavaScript functions: a small polyfill script is put in front of
  *   every ivi page before the site's own scripts run.
- * - Video can go full screen; login cookies are kept between runs; the last page opens again on start.
+ * - Video can go full screen; login cookies are kept between runs; the chosen channel opens on start.
  */
 public class MainActivity extends Activity {
 
-    private static final String HOME_URL = "https://www.ivi.ru/tvplus";
+    /** Opened on every start (the user's chosen channel for now). */
+    private static final String HOME_URL = "https://www.ivi.ru/tvchannels/watch/cgtn";
     private static final String PREFS = "s";
     private static final String KEY_LAST = "last";
 
@@ -113,7 +114,7 @@ public class MainActivity extends Activity {
         root.addView(diag, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START));
 
-        if (web != null) web.loadUrl(lastUrl());
+        if (web != null) web.loadUrl(HOME_URL);
     }
 
     @Override
@@ -661,6 +662,23 @@ public class MainActivity extends Activity {
             + "r.push('iframe: '+document.querySelectorAll('iframe').length);"
             + "}catch(e){r.push('проба: '+e);}return r.join(' · ');})()";
 
+    /** Which browser engines are installed (a newer one can be picked as the system WebView). */
+    private String webViewPackages() {
+        String[] pk = {"com.google.android.webview", "com.android.webview", "com.android.chrome",
+                "com.chrome.beta", "com.google.android.webview.beta"};
+        StringBuilder sb = new StringBuilder();
+        for (String p : pk) {
+            try {
+                android.content.pm.PackageInfo i = getPackageManager().getPackageInfo(p, 0);
+                boolean on = i.applicationInfo == null || i.applicationInfo.enabled;
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(p).append(' ').append(i.versionName).append(on ? "" : " (выключен)");
+            } catch (Exception ignored) {
+            }
+        }
+        return sb.length() == 0 ? "?" : sb.toString();
+    }
+
     private static String shortUrl(String u) {
         return u.length() > 90 ? u.substring(0, 90) + "…" : u;
     }
@@ -676,6 +694,7 @@ public class MainActivity extends Activity {
         diag.setText("TelikIVI " + BuildConfig.VERSION_NAME
                 + " · Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
                 + " · WebView " + chrome
+                + "\nДвижки браузера на приставке: " + webViewPackages()
                 + "\nАдрес: " + url
                 + " · исправлено страниц: " + patchedPages
                 + "\nПлеер: " + probe
