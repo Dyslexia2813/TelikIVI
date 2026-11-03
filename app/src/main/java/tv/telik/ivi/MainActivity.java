@@ -75,6 +75,11 @@ public class MainActivity extends Activity {
     private final LinkedList<String> events = new LinkedList<>();
     private final LinkedList<String> media = new LinkedList<>();
     private String videoState = "-";
+    private final LinkedList<String> playerLog = new LinkedList<>();
+    private final java.util.LinkedHashMap<String, Integer> segments = new java.util.LinkedHashMap<>();
+    /** Ads and counters: their failures don't matter for the video and only clutter the screen. */
+    private static final java.util.regex.Pattern NOISE = java.util.regex.Pattern.compile(
+            "doubleclick|adriver|tns-counter|stbid|mail\\.ru|flocktory|targetads|yandex|mc\\.|googletag|google-analytics|adfox|top-fwz|mediascope|statad|adhigh|weborama|criteo|vk\\.com|ok\\.ru");
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -160,6 +165,8 @@ public class MainActivity extends Activity {
         note("сайт как " + (d ? "компьютер" : "телефон"));
         videoState = "-";
         media.clear();
+        playerLog.clear();
+        segments.clear();
         if (session != null) {
             view.releaseSession();
             session.close();
@@ -190,7 +197,18 @@ public class MainActivity extends Activity {
 
     private void onDiag(JSONObject m) {
         String t = m.optString("t");
+        String all = m.toString();
+        if (!"player".equals(t) && !"video".equals(t) && NOISE.matcher(all).find()) return;
         switch (t) {
+            case "player":
+                playerLog.addFirst(String.format(java.util.Locale.US, "%tR:%<tS ", new java.util.Date()) + m.optString("m"));
+                while (playerLog.size() > 9) playerLog.removeLast();
+                refreshDiag();
+                break;
+            case "seg":
+                segments.put(m.optString("h"), m.optInt("n"));
+                refreshDiag();
+                break;
             case "video":
                 videoState = m.optString("m");
                 refreshDiag();
@@ -517,7 +535,7 @@ public class MainActivity extends Activity {
                     + (e.length() > 200 ? e.substring(0, 200) : e);
             events.addFirst(s);
             if (events.size() > 1 && events.get(1).substring(6).equals(s.substring(6))) events.remove(1);
-            while (events.size() > 8) events.removeLast();
+            while (events.size() > 5) events.removeLast();
             refreshDiag();
         });
     }
@@ -532,6 +550,7 @@ public class MainActivity extends Activity {
     }
 
     private void showDiag() {
+        diag.setTextSize(10);
         String url = currentUrl.length() > 120 ? currentUrl.substring(0, 120) + "…" : currentUrl;
         diag.setText("TelikIVI " + BuildConfig.VERSION_NAME
                 + " · Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
@@ -540,6 +559,8 @@ public class MainActivity extends Activity {
                 + "\nАдрес: " + url + " · " + loadState + " · сайт как " + (desktopMode() ? "компьютер" : "телефон")
                 + "\nВидео: " + videoState
                 + "\nЗапросы видео: " + (media.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", media))
+                + "\nКуски потока: " + (segments.isEmpty() ? "-" : segments.toString())
+                + "\nПлеер (новые сверху): " + (playerLog.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", playerLog))
                 + "\nСобытия: " + (events.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", events))
                 + "\n(OK — переключить сайт телефон/компьютер · Menu или Назад закрывает)");
         diag.setVisibility(View.VISIBLE);
