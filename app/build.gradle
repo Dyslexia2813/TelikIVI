@@ -4,16 +4,18 @@ plugins {
 
 android {
     namespace 'tv.telik.ivi'
-    compileSdk 34
+    compileSdk 35
 
     defaultConfig {
         applicationId 'tv.telik.ivi'
         minSdk 21
-        targetSdk 34
-        versionCode 4
-        versionName '0.4'
+        targetSdk 35
+        versionCode 5
+        versionName '0.5'
         // Only keep resources we actually ship (no extra translations from libraries).
         resourceConfigurations += ['ru', 'en']
+        // The box is 32-bit ARM; one engine build instead of four keeps the APK much smaller.
+        ndk { abiFilters 'armeabi-v7a' }
     }
 
     signingConfigs {
@@ -29,8 +31,8 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled false
+            shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
         }
@@ -60,11 +62,13 @@ android {
 
     packaging {
         resources {
-            excludes += ['META-INF/**', 'kotlin/**', '**/*.kotlin_builtins', '**/*.version']
+            excludes += ['META-INF/*.version', 'META-INF/*.kotlin_module', 'kotlin/**', '**/*.kotlin_builtins']
         }
     }
 }
 
 dependencies {
-    // None: the app is only the system WebView plus a pointer for the remote.
+    // Firefox's engine: the box's own browser (Chrome 52, 2016) can't run ivi's scripts.
+    // 144 is the last release that still supports Android 7 (from 145 it needs Android 8).
+    implementation 'org.mozilla.geckoview:geckoview:144.+'
 }
