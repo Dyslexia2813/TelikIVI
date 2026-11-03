@@ -159,6 +159,12 @@ final class NativePlayer {
         }
 
         @Override
+        public void onRenderedFirstFrame() {
+            Format f = player != null ? player.getVideoFormat() : null;
+            setState("идёт, картинка есть" + (f != null ? " " + f.width + "x" + f.height : ""));
+        }
+
+        @Override
         public void onPlayerError(PlaybackException e) {
             Throwable c = e.getCause();
             setState("ОШИБКА " + e.getErrorCodeName() + (c != null ? ": " + c : ""));

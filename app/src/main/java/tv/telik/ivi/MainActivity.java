@@ -83,6 +83,11 @@ public class MainActivity extends Activity {
     private java.util.Map<String, String> manifestHeaders, licenseHeaders;
     private boolean nativeDeclined; // the user pressed Back on the native player: stay on the page
     private final Runnable startNativeAnyway = this::startNative;
+    private boolean drmRequested;  // the page asked for protected video: wait for its licence
+    private boolean pageParked;    // the page is closed to free memory while our player shows the picture
+    private boolean reopening;     // the page is being opened again after Back from our player
+    private long lastRestart;
+    private int restarts;
     private final LinkedList<String> playerLog = new LinkedList<>();
     private final java.util.LinkedHashMap<String, Integer> segments = new java.util.LinkedHashMap<>();
     /** Ads and counters: their failures don't matter for the video and only clutter the screen. */
@@ -117,7 +122,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START));
 
         nativePlayer = new NativePlayer(this, root, st -> {
-            if ("идёт".equals(st) || st.startsWith("идёт ")) pointer.setVisibility(View.INVISIBLE);
+            if (st.startsWith("идёт")) pointer.setVisibility(View.INVISIBLE);
             refreshDiag();
         });
 
@@ -141,7 +146,11 @@ public class MainActivity extends Activity {
                     + "  media.eme.enabled: true\n"
                     + "  media.mediadrm-widevinecdm.visible: true\n"
                     + "  media.autoplay.default: 0\n"
-                    + "  media.autoplay.blocking_policy: 0\n").getBytes("UTF-8"));
+                    + "  media.autoplay.blocking_policy: 0\n"
+                    // Less memory: the box has little, and our own player needs some too.
+                    + "  browser.sessionhistory.max_total_viewers: 0\n"
+                    + "  browser.cache.memory.capacity: 16384\n"
+                    + "  media.memory_cache_max_size: 16384\n").getBytes("UTF-8"));
             out.close();
             b.configFilePath(f.getAbsolutePath());
         } catch (Exception e) {
@@ -165,6 +174,7 @@ public class MainActivity extends Activity {
         if (diagExt != null) session.getWebExtensionController().setMessageDelegate(diagExt, diagMessages, "browser");
         session.open(runtime);
         view.setSession(session);
+        view.coverUntilFirstPaint(Color.BLACK); // no white flash while a page loads
     }
 
     private boolean desktopMode() {
@@ -271,17 +281,16 @@ public class MainActivity extends Activity {
             manifestDash = "dash".equals(m.optString("f"));
             manifestHeaders = headers(m.optJSONObject("h"));
             note("поток найден (" + (manifestDash ? "DASH" : "HLS") + ")");
-            // Licence usually comes within a second or two; start without it if it doesn't.
+            // Protected video: wait for the licence request; open video: start soon.
             main.removeCallbacks(startNativeAnyway);
-            main.postDelayed(startNativeAnyway, 6_000);
+            main.postDelayed(startNativeAnyway, drmRequested ? 25_000 : 8_000);
         } else if ("license".equals(m.optString("k"))) {
             licenseUrl = m.optString("u");
             licenseHeaders = headers(m.optJSONObject("h"));
         }
         if (manifestUrl != null && licenseUrl != null) {
-            // Let the site finish its own licence exchange first, then take over.
             main.removeCallbacks(startNativeAnyway);
-            main.postDelayed(startNativeAnyway, 1_500);
+            main.postDelayed(startNativeAnyway, 500);
         }
     }
 
@@ -290,25 +299,42 @@ public class MainActivity extends Activity {
         note("включаю свой плеер" + (licenseUrl != null ? " с DRM" : " без DRM"));
         nativePlayer.start(manifestUrl, manifestDash, manifestHeaders, licenseUrl,
                 licenseHeaders != null ? licenseHeaders : new java.util.HashMap<>());
-        // The page's own (stuck) player stops downloading while ours plays.
-        if (session != null) session.setActive(false);
+        // The box has little memory: close the page (and its stuck player) while ours plays.
+        // Our player has everything it needs (stream, licence address, headers).
+        if (session != null) {
+            view.releaseSession();
+            session.close();
+            session = null;
+        }
+        pageParked = true;
         pointer.bringToFront();
         diag.bringToFront();
     }
 
+    /** declined: the user pressed Back, so open the page again and don't jump back into the player. */
     private void stopNative(boolean declined) {
         main.removeCallbacks(startNativeAnyway);
         boolean was = nativePlayer.isShowing();
         nativePlayer.stop();
         if (declined && was) nativeDeclined = true;
-        if (session != null) session.setActive(true);
+        if (pageParked) {
+            pageParked = false;
+            reopening = true;
+            openSession();
+            session.loadUri(currentUrl.startsWith("http") ? currentUrl : HOME_URL);
+        }
     }
 
     private void resetStream() {
         manifestUrl = licenseUrl = null;
         manifestHeaders = licenseHeaders = null;
+        drmRequested = false;
+        if (reopening) {
+            reopening = false; // same page after Back: stay on it
+            return;
+        }
         nativeDeclined = false;
-        stopNative(false);
+        if (nativePlayer.isShowing() || pageParked) stopNative(false);
     }
 
     private static String shortUrl(String u) {
@@ -318,7 +344,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (session != null && !nativePlayer.isShowing()) session.setActive(true);
+        if (session != null) session.setActive(true);
     }
 
     @Override
@@ -366,18 +392,26 @@ public class MainActivity extends Activity {
 
         @Override
         public void onCrash(GeckoSession s) {
-            note("страница упала, перезапуск");
+            note("страница упала");
             restartSession();
         }
 
         @Override
         public void onKill(GeckoSession s) {
-            note("страница выгружена из памяти, перезапуск");
+            note("страница выгружена из памяти");
             restartSession();
         }
     };
 
     private void restartSession() {
+        if (s_isParked()) return; // our player is on; the page will be opened again on Back
+        long now = SystemClock.uptimeMillis();
+        restarts = now - lastRestart < 60_000 ? restarts + 1 : 1;
+        lastRestart = now;
+        if (restarts > 3) {
+            note("страница падает слишком часто: перезапусти приложение");
+            return;
+        }
         main.postDelayed(() -> {
             if (isFinishing()) return;
             if (session != null) {
@@ -389,12 +423,35 @@ public class MainActivity extends Activity {
         }, 1_000);
     }
 
+    private boolean s_isParked() {
+        return pageParked || nativePlayer.isShowing();
+    }
+
     private final GeckoSession.NavigationDelegate navigationDelegate = new GeckoSession.NavigationDelegate() {
         @Override
         public void onCanGoBack(GeckoSession s, boolean can) {
             canGoBack = can;
         }
+
+        // Inside ivi the address changes without a full page load (e.g. another channel):
+        // treat it as a new page. Both forms are declared; the engine calls the one it has.
+        public void onLocationChange(GeckoSession s, String url,
+                java.util.List<GeckoSession.PermissionDelegate.ContentPermission> perms, Boolean gesture) {
+            onAddress(url);
+        }
+
+        public void onLocationChange(GeckoSession s, String url,
+                java.util.List<GeckoSession.PermissionDelegate.ContentPermission> perms) {
+            onAddress(url);
+        }
     };
+
+    private void onAddress(String url) {
+        if (url == null || url.equals(currentUrl) || !url.startsWith("http")) return;
+        currentUrl = url;
+        resetStream();
+        refreshDiag();
+    }
 
     private final GeckoSession.ProgressDelegate progressDelegate = new GeckoSession.ProgressDelegate() {
         @Override
@@ -422,7 +479,15 @@ public class MainActivity extends Activity {
                     || p == PERMISSION_AUTOPLAY_AUDIBLE
                     || p == PERMISSION_AUTOPLAY_INAUDIBLE
                     || p == PERMISSION_PERSISTENT_STORAGE;
-            if (p == PERMISSION_MEDIA_KEY_SYSTEM_ACCESS) note("сайт запросил защищённое видео (DRM): разрешено");
+            if (p == PERMISSION_MEDIA_KEY_SYSTEM_ACCESS) {
+                drmRequested = true;
+                note("сайт запросил защищённое видео (DRM): разрешено");
+                // The manifest may already be known: give the licence time to arrive.
+                if (manifestUrl != null && licenseUrl == null) {
+                    main.removeCallbacks(startNativeAnyway);
+                    main.postDelayed(startNativeAnyway, 25_000);
+                }
+            }
             return GeckoResult.fromValue(ok ? ContentPermission.VALUE_ALLOW : ContentPermission.VALUE_DENY);
         }
     };
