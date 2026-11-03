@@ -10,8 +10,8 @@ android {
         applicationId 'tv.telik.ivi'
         minSdk 21
         targetSdk 35
-        versionCode 7
-        versionName '0.7'
+        versionCode 8
+        versionName '0.8'
         // Only keep resources we actually ship (no extra translations from libraries).
         resourceConfigurations += ['ru', 'en']
         // The box is 32-bit ARM; one engine build instead of four keeps the APK much smaller.
@@ -71,4 +71,8 @@ dependencies {
     // Firefox's engine: the box's own browser (Chrome 52, 2016) can't run ivi's scripts.
     // 144 is the last release that still supports Android 7 (from 145 it needs Android 8).
     implementation 'org.mozilla.geckoview:geckoview:144.+'
+    // Android's own player for the picture itself (with the box's Widevine DRM).
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation 'androidx.media3:media3-exoplayer-dash:1.4.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
 }

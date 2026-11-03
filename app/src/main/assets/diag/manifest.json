@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "TelikIVI diagnostics",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Reports page script errors, failed requests and video state to the app's Menu screen.",
   "browser_specific_settings": { "gecko": { "id": "diag@telik.tv" } },
   "permissions": ["nativeMessaging", "nativeMessagingFromContent", "geckoViewAddons", "webRequest", "<all_urls>"],

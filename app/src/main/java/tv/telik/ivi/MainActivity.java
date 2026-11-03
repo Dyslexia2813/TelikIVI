@@ -75,6 +75,14 @@ public class MainActivity extends Activity {
     private final LinkedList<String> events = new LinkedList<>();
     private final LinkedList<String> media = new LinkedList<>();
     private String videoState = "-";
+
+    // The stream the site's player opened, handed to Android's own player (see NativePlayer).
+    private NativePlayer nativePlayer;
+    private String manifestUrl, licenseUrl;
+    private boolean manifestDash;
+    private java.util.Map<String, String> manifestHeaders, licenseHeaders;
+    private boolean nativeDeclined; // the user pressed Back on the native player: stay on the page
+    private final Runnable startNativeAnyway = this::startNative;
     private final LinkedList<String> playerLog = new LinkedList<>();
     private final java.util.LinkedHashMap<String, Integer> segments = new java.util.LinkedHashMap<>();
     /** Ads and counters: their failures don't matter for the video and only clutter the screen. */
@@ -107,6 +115,11 @@ public class MainActivity extends Activity {
         root.addView(pointer, matchParent());
         root.addView(diag, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START));
+
+        nativePlayer = new NativePlayer(this, root, st -> {
+            if ("идёт".equals(st) || st.startsWith("идёт ")) pointer.setVisibility(View.INVISIBLE);
+            refreshDiag();
+        });
 
         if (runtime == null) runtime = GeckoRuntime.create(getApplicationContext(), runtimeSettings());
         openSession();
@@ -167,6 +180,7 @@ public class MainActivity extends Activity {
         media.clear();
         playerLog.clear();
         segments.clear();
+        resetStream();
         if (session != null) {
             view.releaseSession();
             session.close();
@@ -198,6 +212,10 @@ public class MainActivity extends Activity {
     private void onDiag(JSONObject m) {
         String t = m.optString("t");
         String all = m.toString();
+        if ("stream".equals(t)) {
+            onStream(m);
+            return;
+        }
         if (!"player".equals(t) && !"video".equals(t) && NOISE.matcher(all).find()) return;
         switch (t) {
             case "player":
@@ -232,6 +250,67 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---------------------------------------------------------------- native playback
+
+    private static java.util.Map<String, String> headers(JSONObject h) {
+        java.util.Map<String, String> out = new java.util.HashMap<>();
+        if (h == null) return out;
+        java.util.Iterator<String> it = h.keys();
+        while (it.hasNext()) {
+            String k = it.next();
+            out.put(k, h.optString(k));
+        }
+        return out;
+    }
+
+    private void onStream(JSONObject m) {
+        if (nativeDeclined || nativePlayer.isShowing()) return;
+        if ("manifest".equals(m.optString("k"))) {
+            if (manifestUrl != null) return; // live manifests are re-read all the time; the first one is enough
+            manifestUrl = m.optString("u");
+            manifestDash = "dash".equals(m.optString("f"));
+            manifestHeaders = headers(m.optJSONObject("h"));
+            note("поток найден (" + (manifestDash ? "DASH" : "HLS") + ")");
+            // Licence usually comes within a second or two; start without it if it doesn't.
+            main.removeCallbacks(startNativeAnyway);
+            main.postDelayed(startNativeAnyway, 6_000);
+        } else if ("license".equals(m.optString("k"))) {
+            licenseUrl = m.optString("u");
+            licenseHeaders = headers(m.optJSONObject("h"));
+        }
+        if (manifestUrl != null && licenseUrl != null) {
+            // Let the site finish its own licence exchange first, then take over.
+            main.removeCallbacks(startNativeAnyway);
+            main.postDelayed(startNativeAnyway, 1_500);
+        }
+    }
+
+    private void startNative() {
+        if (manifestUrl == null || nativeDeclined || nativePlayer.isShowing() || isFinishing()) return;
+        note("включаю свой плеер" + (licenseUrl != null ? " с DRM" : " без DRM"));
+        nativePlayer.start(manifestUrl, manifestDash, manifestHeaders, licenseUrl,
+                licenseHeaders != null ? licenseHeaders : new java.util.HashMap<>());
+        // The page's own (stuck) player stops downloading while ours plays.
+        if (session != null) session.setActive(false);
+        pointer.bringToFront();
+        diag.bringToFront();
+    }
+
+    private void stopNative(boolean declined) {
+        main.removeCallbacks(startNativeAnyway);
+        boolean was = nativePlayer.isShowing();
+        nativePlayer.stop();
+        if (declined && was) nativeDeclined = true;
+        if (session != null) session.setActive(true);
+    }
+
+    private void resetStream() {
+        manifestUrl = licenseUrl = null;
+        manifestHeaders = licenseHeaders = null;
+        nativeDeclined = false;
+        stopNative(false);
+    }
+
     private static String shortUrl(String u) {
         return u.length() > 90 ? u.substring(0, 90) + "…" : u;
     }
@@ -239,7 +318,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (session != null) session.setActive(true);
+        if (session != null && !nativePlayer.isShowing()) session.setActive(true);
     }
 
     @Override
@@ -251,6 +330,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         main.removeCallbacksAndMessages(null);
+        if (nativePlayer != null) nativePlayer.stop();
         if (session != null) {
             view.releaseSession();
             session.close();
@@ -320,6 +400,7 @@ public class MainActivity extends Activity {
         @Override
         public void onPageStart(GeckoSession s, String url) {
             currentUrl = url;
+            resetStream();
             loadState = "загрузка";
             refreshDiag();
         }
@@ -400,6 +481,9 @@ public class MainActivity extends Activity {
                 if (!down) return true;
                 if (diag.getVisibility() == View.VISIBLE) {
                     diag.setVisibility(View.GONE);
+                } else if (nativePlayer.isShowing()) {
+                    // Back from the picture to the page (e.g. to pick another channel).
+                    stopNative(true);
                 } else if (fullScreen && session != null) {
                     session.exitFullScreen();
                 } else if (canGoBack && session != null) {
@@ -557,7 +641,10 @@ public class MainActivity extends Activity {
                 + " · движок Firefox " + org.mozilla.geckoview.BuildConfig.MOZILLA_VERSION
                 + " · " + Build.SUPPORTED_ABIS[0]
                 + "\nАдрес: " + url + " · " + loadState + " · сайт как " + (desktopMode() ? "компьютер" : "телефон")
-                + "\nВидео: " + videoState
+                + "\nСвой плеер: " + (nativePlayer.isShowing() ? nativePlayer.state()
+                        : manifestUrl != null ? (nativeDeclined ? "выключен кнопкой Назад" : "поток найден, жду лицензию") : "ждёт поток")
+                + (licenseUrl != null ? " · лицензия: " + shortUrl(licenseUrl) : "")
+                + "\nВидео сайта: " + videoState
                 + "\nЗапросы видео: " + (media.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", media))
                 + "\nКуски потока: " + (segments.isEmpty() ? "-" : segments.toString())
                 + "\nПлеер (новые сверху): " + (playerLog.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", playerLog))

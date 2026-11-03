@@ -19,3 +19,26 @@ browser.webRequest.onBeforeRequest.addListener(function (d) {
     if (seg[h] === 1 || seg[h] === 5 || seg[h] % 50 === 0) send({ t: "seg", h: h, n: seg[h] });
   }
 }, all);
+
+// Stream hand-over to the app's own player: the video manifest and the DRM licence request, with the
+// headers the site's player used, so the app can play the same stream natively.
+var hdrs = {};
+browser.webRequest.onBeforeSendHeaders.addListener(function (d) {
+  var h = {};
+  (d.requestHeaders || []).forEach(function (x) { h[x.name] = x.value; });
+  hdrs[d.requestId] = h;
+  if (/\/\/w\.ivi\.ru\/proxy\//.test(d.url) && d.method === "POST") {
+    send({ t: "stream", k: "license", u: d.url, h: h });
+  }
+}, all, ["requestHeaders"]);
+browser.webRequest.onHeadersReceived.addListener(function (d) {
+  var type = "";
+  (d.responseHeaders || []).forEach(function (x) { if (x.name.toLowerCase() === "content-type") type = x.value || ""; });
+  var u = d.url.toLowerCase();
+  var dash = /dash\+xml/.test(type) || /\.mpd(\?|$)/.test(u);
+  var hls = /mpegurl/i.test(type) || /\.m3u8(\?|$)/.test(u);
+  if ((dash || hls) && d.statusCode < 400) {
+    send({ t: "stream", k: "manifest", f: dash ? "dash" : "hls", u: d.url, ct: type, h: hdrs[d.requestId] || {} });
+  }
+  delete hdrs[d.requestId];
+}, all, ["responseHeaders"]);
