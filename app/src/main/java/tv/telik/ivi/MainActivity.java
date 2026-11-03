@@ -27,6 +27,9 @@ import org.mozilla.geckoview.GeckoRuntimeSettings;
 import org.mozilla.geckoview.GeckoSession;
 import org.mozilla.geckoview.GeckoSessionSettings;
 import org.mozilla.geckoview.GeckoView;
+import org.mozilla.geckoview.WebExtension;
+
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -42,7 +45,8 @@ import java.util.LinkedList;
  *   (or a row of posters) that way.
  * - A USB/wireless mouse works as usual; the remote's pointer then jumps to where the mouse is.
  * - Back leaves full-screen video, then goes back in the site's history; on the first page it exits.
- * - Menu shows diagnostics.
+ * - Menu shows diagnostics (fed by a small built-in add-on, assets/diag); with it open, OK switches the site
+ *   between its phone and computer versions.
  * - Login cookies are kept between runs; the chosen channel opens on start.
  */
 public class MainActivity extends Activity {
@@ -52,6 +56,9 @@ public class MainActivity extends Activity {
 
     /** One engine per app process. */
     private static GeckoRuntime runtime;
+    private static WebExtension diagExt;
+    private static final String PREFS = "s";
+    private static final String KEY_DESKTOP = "desktop";
 
     private final Handler main = new Handler(Looper.getMainLooper());
 
@@ -66,6 +73,8 @@ public class MainActivity extends Activity {
     private String currentUrl = "-";
     private String loadState = "-";
     private final LinkedList<String> events = new LinkedList<>();
+    private final LinkedList<String> media = new LinkedList<>();
+    private String videoState = "-";
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -96,6 +105,7 @@ public class MainActivity extends Activity {
 
         if (runtime == null) runtime = GeckoRuntime.create(getApplicationContext(), runtimeSettings());
         openSession();
+        installDiagAddon();
         session.loadUri(HOME_URL);
         view.requestFocus();
     }
@@ -125,14 +135,87 @@ public class MainActivity extends Activity {
     private void openSession() {
         session = new GeckoSession(new GeckoSessionSettings.Builder()
                 .usePrivateMode(false)
-                .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_MOBILE)
+                .userAgentMode(desktopMode() ? GeckoSessionSettings.USER_AGENT_MODE_DESKTOP
+                        : GeckoSessionSettings.USER_AGENT_MODE_MOBILE)
+                .viewportMode(desktopMode() ? GeckoSessionSettings.VIEWPORT_MODE_DESKTOP
+                        : GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
                 .build());
         session.setContentDelegate(contentDelegate);
         session.setNavigationDelegate(navigationDelegate);
         session.setProgressDelegate(progressDelegate);
         session.setPermissionDelegate(permissionDelegate);
+        if (diagExt != null) session.getWebExtensionController().setMessageDelegate(diagExt, diagMessages, "browser");
         session.open(runtime);
         view.setSession(session);
+    }
+
+    private boolean desktopMode() {
+        return getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_DESKTOP, false);
+    }
+
+    /** Phone version of the site <-> computer version, then reload. */
+    private void toggleDesktop() {
+        boolean d = !desktopMode();
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_DESKTOP, d).apply();
+        note("сайт как " + (d ? "компьютер" : "телефон"));
+        videoState = "-";
+        media.clear();
+        if (session != null) {
+            view.releaseSession();
+            session.close();
+        }
+        openSession();
+        session.loadUri(currentUrl.startsWith("http") ? currentUrl : HOME_URL);
+    }
+
+    // ---------------------------------------------------------------- diagnostics add-on
+
+    private void installDiagAddon() {
+        runtime.getWebExtensionController()
+                .ensureBuiltIn("resource://android/assets/diag/", "diag@telik.tv")
+                .accept(ext -> {
+                    diagExt = ext;
+                    ext.setMessageDelegate(diagMessages, "browser");
+                    if (session != null) session.getWebExtensionController().setMessageDelegate(ext, diagMessages, "browser");
+                }, e -> note("диагностика не включилась: " + e));
+    }
+
+    private final WebExtension.MessageDelegate diagMessages = new WebExtension.MessageDelegate() {
+        @Override
+        public GeckoResult<Object> onMessage(String nativeApp, Object message, WebExtension.MessageSender sender) {
+            if (message instanceof JSONObject) onDiag((JSONObject) message);
+            return null;
+        }
+    };
+
+    private void onDiag(JSONObject m) {
+        String t = m.optString("t");
+        switch (t) {
+            case "video":
+                videoState = m.optString("m");
+                refreshDiag();
+                break;
+            case "media":
+                String u = shortUrl(m.optString("u"));
+                if (!media.contains(u)) {
+                    media.addFirst(u);
+                    while (media.size() > 3) media.removeLast();
+                    refreshDiag();
+                }
+                break;
+            case "http":
+                note("HTTP " + m.optInt("s") + " " + shortUrl(m.optString("u")));
+                break;
+            case "net":
+                note("сеть " + m.optString("e") + " " + shortUrl(m.optString("u")));
+                break;
+            default:
+                note(("console".equals(t) ? "консоль: " : "JS: ") + m.optString("m") + " [" + m.optString("f") + "]");
+        }
+    }
+
+    private static String shortUrl(String u) {
+        return u.length() > 90 ? u.substring(0, 90) + "…" : u;
     }
 
     @Override
@@ -284,6 +367,12 @@ public class MainActivity extends Activity {
                 if (down) pointer.move(0, 1, event.getRepeatCount());
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
+                if (diag.getVisibility() == View.VISIBLE) {
+                    if (down && event.getRepeatCount() == 0) toggleDesktop();
+                    return true;
+                }
+                if (down && event.getRepeatCount() == 0) pointer.click();
+                return true;
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
@@ -427,7 +516,8 @@ public class MainActivity extends Activity {
             String s = String.format(java.util.Locale.US, "%tR ", new java.util.Date())
                     + (e.length() > 200 ? e.substring(0, 200) : e);
             events.addFirst(s);
-            while (events.size() > 6) events.removeLast();
+            if (events.size() > 1 && events.get(1).substring(6).equals(s.substring(6))) events.remove(1);
+            while (events.size() > 8) events.removeLast();
             refreshDiag();
         });
     }
@@ -447,9 +537,11 @@ public class MainActivity extends Activity {
                 + " · Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
                 + " · движок Firefox " + org.mozilla.geckoview.BuildConfig.MOZILLA_VERSION
                 + " · " + Build.SUPPORTED_ABIS[0]
-                + "\nАдрес: " + url + " · " + loadState
+                + "\nАдрес: " + url + " · " + loadState + " · сайт как " + (desktopMode() ? "компьютер" : "телефон")
+                + "\nВидео: " + videoState
+                + "\nЗапросы видео: " + (media.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", media))
                 + "\nСобытия: " + (events.isEmpty() ? "-" : android.text.TextUtils.join("\n   ", events))
-                + "\n(Menu или Назад закрывает)");
+                + "\n(OK — переключить сайт телефон/компьютер · Menu или Назад закрывает)");
         diag.setVisibility(View.VISIBLE);
         diag.bringToFront();
     }
