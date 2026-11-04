@@ -51,8 +51,8 @@ import java.util.LinkedList;
  */
 public class MainActivity extends Activity {
 
-    /** Opened on every start (the user's chosen channel for now). */
-    private static final String HOME_URL = "https://www.ivi.ru/tvchannels/watch/cgtn";
+    /** Opened on every start: the "Живая природа" channel (needs an ivi subscription, so log in once). */
+    private static final String HOME_URL = "https://www.ivi.ru/tvchannels/watch/zhivaya_priroda";
 
     /** One engine per app process. */
     private static GeckoRuntime runtime;
@@ -320,6 +320,7 @@ public class MainActivity extends Activity {
         if (declined && was) nativeDeclined = true;
         if (pageParked) {
             view.setVisibility(View.VISIBLE);
+            view.requestFocus(); // so typing (login) reaches the page
             pageParked = false;
             reopening = true;
             openSession();
@@ -435,6 +436,13 @@ public class MainActivity extends Activity {
             canGoBack = can;
         }
 
+        // Login and other pages the site opens "in a new window": open them right here.
+        @Override
+        public GeckoResult<GeckoSession> onNewSession(GeckoSession s, String uri) {
+            s.loadUri(uri);
+            return null;
+        }
+
         // Inside ivi the address changes without a full page load (e.g. another channel):
         // treat it as a new page. Both forms are declared; the engine calls the one it has.
         public void onLocationChange(GeckoSession s, String url,
@@ -541,6 +549,14 @@ public class MainActivity extends Activity {
                 return true;
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                // Enter on a real keyboard goes to the page (e.g. sends the login form);
+                // on a remote it is the OK button.
+                if (event.getDevice() != null
+                        && event.getDevice().getKeyboardType() == android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+                    return super.dispatchKeyEvent(event);
+                }
+                if (down && event.getRepeatCount() == 0) pointer.click();
+                return true;
             case KeyEvent.KEYCODE_BUTTON_A:
                 if (down && event.getRepeatCount() == 0) pointer.click();
                 return true;
@@ -703,7 +719,7 @@ public class MainActivity extends Activity {
     private void showDiag() {
         diag.setTextSize(10);
         String url = currentUrl.length() > 120 ? currentUrl.substring(0, 120) + "…" : currentUrl;
-        diag.setText("TelikIVI " + BuildConfig.VERSION_NAME
+        diag.setText(getString(R.string.app_name) + " " + BuildConfig.VERSION_NAME
                 + " · Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"
                 + " · движок Firefox " + org.mozilla.geckoview.BuildConfig.MOZILLA_VERSION
                 + " · " + Build.SUPPORTED_ABIS[0]
