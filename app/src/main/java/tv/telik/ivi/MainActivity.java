@@ -59,6 +59,9 @@ public class MainActivity extends Activity {
     private static WebExtension diagExt;
     private static final String PREFS = "s";
     private static final String KEY_DESKTOP = "desktop";
+    private static final String KEY_MAX_QUALITY = "maxq";
+    private TextView badge;
+    private final Runnable hideBadge = () -> badge.setVisibility(View.GONE);
 
     private final Handler main = new Handler(Looper.getMainLooper());
 
@@ -121,10 +124,29 @@ public class MainActivity extends Activity {
         root.addView(diag, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START));
 
-        nativePlayer = new NativePlayer(this, root, st -> {
-            if (st.startsWith("идёт")) pointer.setVisibility(View.INVISIBLE);
-            refreshDiag();
+        badge = new TextView(this);
+        badge.setTextColor(Color.WHITE);
+        badge.setBackgroundColor(0xAA000000);
+        badge.setTextSize(14);
+        badge.setPadding(20, 10, 20, 10);
+        badge.setVisibility(View.GONE);
+        root.addView(badge, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+
+        nativePlayer = new NativePlayer(this, root, new NativePlayer.Listener() {
+            @Override
+            public void onState(String st) {
+                if (st.startsWith("идёт")) pointer.setVisibility(View.INVISIBLE);
+                refreshDiag();
+            }
+
+            @Override
+            public void onQualityChanged() {
+                showBadge();
+                refreshDiag();
+            }
         });
+        nativePlayer.setMaxQuality(getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MAX_QUALITY, false));
 
         if (runtime == null) runtime = GeckoRuntime.create(getApplicationContext(), runtimeSettings());
         openSession();
@@ -535,6 +557,16 @@ public class MainActivity extends Activity {
                 if (down) pointer.move(1, 0, event.getRepeatCount());
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
+                if (nativePlayer.isShowing()) {
+                    // While watching: Up switches quality between automatic and maximum.
+                    if (down && event.getRepeatCount() == 0) {
+                        boolean max = !nativePlayer.isMaxQuality();
+                        nativePlayer.setMaxQuality(max);
+                        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_MAX_QUALITY, max).apply();
+                        showBadge();
+                    }
+                    return true;
+                }
                 if (down) pointer.move(0, -1, event.getRepeatCount());
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
@@ -707,6 +739,17 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** Corner note for a few seconds: quality mode and the current picture size. */
+    private void showBadge() {
+        if (!nativePlayer.isShowing()) return;
+        badge.setText("Качество: " + (nativePlayer.isMaxQuality() ? "максимум" : "авто")
+                + " · " + nativePlayer.qualityInfo() + "\n(кнопка Вверх переключает)");
+        badge.setVisibility(View.VISIBLE);
+        badge.bringToFront();
+        main.removeCallbacks(hideBadge);
+        main.postDelayed(hideBadge, 4_000);
+    }
+
     private void toggleDiag() {
         if (diag.getVisibility() == View.VISIBLE) diag.setVisibility(View.GONE);
         else showDiag();
@@ -725,6 +768,7 @@ public class MainActivity extends Activity {
                 + " · " + Build.SUPPORTED_ABIS[0]
                 + "\nАдрес: " + url + " · " + loadState + " · сайт как " + (desktopMode() ? "компьютер" : "телефон")
                 + "\nСвой плеер: " + (nativePlayer.isShowing() ? nativePlayer.state()
+                        + " · качество " + (nativePlayer.isMaxQuality() ? "максимум" : "авто") + ": " + nativePlayer.qualityInfo()
                         : manifestUrl != null ? (nativeDeclined ? "выключен кнопкой Назад" : "поток найден, жду лицензию") : "ждёт поток")
                 + (licenseUrl != null ? " · лицензия: " + shortUrl(licenseUrl) : "")
                 + "\nВидео сайта: " + videoState

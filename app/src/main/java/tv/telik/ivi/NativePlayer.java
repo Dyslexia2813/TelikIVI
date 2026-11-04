@@ -17,6 +17,7 @@ import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -30,6 +31,8 @@ final class NativePlayer {
 
     interface Listener {
         void onState(String state);
+
+        void onQualityChanged();
     }
 
     private final Context context;
@@ -39,6 +42,12 @@ final class NativePlayer {
     private ExoPlayer player;
     private String state = "-";
     private int retries;
+    private DefaultTrackSelector trackSelector;
+    /** Max: always the best variant; auto: follows the network speed. */
+    private boolean maxQuality;
+    /** The box's decoder really refused the top variant once: respect its own limits from then on. */
+    private static boolean strictDecoder;
+    private Runnable restartWithSameStream;
     private boolean firstFrame;
     private Runnable retry;
 
@@ -72,6 +81,7 @@ final class NativePlayer {
     void start(String manifest, boolean dash, Map<String, String> headers, String licenseUrl,
                Map<String, String> licenseHeaders) {
         stop();
+        restartWithSameStream = () -> start(manifest, dash, headers, licenseUrl, licenseHeaders);
         retries = 0;
         surface = new SurfaceView(context);
         // The page engine draws on a surface of its own: keep ours on top of it.
@@ -114,11 +124,16 @@ final class NativePlayer {
                 new androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.Builder(context)
                         .setInitialBitrateEstimate(20_000_000L)
                         .build();
+        // The box reports a 1280x720 screen even when the TV gets 1080p: don't cap the quality at that.
+        trackSelector = new DefaultTrackSelector(context);
+        trackSelector.setParameters(qualityParams());
         player = new ExoPlayer.Builder(context,
-                new DefaultRenderersFactory(context).setEnableDecoderFallback(true),
+                strictDecoder ? new DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+                        : new TrustingRenderersFactory(context),
                 new DefaultMediaSourceFactory(http))
                 .setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT)
                 .setBandwidthMeter(meter)
+                .setTrackSelector(trackSelector)
                 .build();
         player.setVideoSurfaceView(surface);
         player.addListener(events);
@@ -126,6 +141,47 @@ final class NativePlayer {
         player.setPlayWhenReady(true);
         player.prepare();
         setState("подключение");
+    }
+
+    private DefaultTrackSelector.Parameters qualityParams() {
+        DefaultTrackSelector.Parameters.Builder b = trackSelector.buildUponParameters()
+                .clearViewportSizeConstraints()
+                .setExceedRendererCapabilitiesIfNecessary(true)
+                .setForceHighestSupportedBitrate(maxQuality);
+        if (strictDecoder) b.setMaxVideoSize(1920, 1080);
+        else b.clearVideoSizeConstraints();
+        return b.build();
+    }
+
+    boolean isMaxQuality() {
+        return maxQuality;
+    }
+
+    /** Switch between automatic and maximum quality; works on the fly. */
+    void setMaxQuality(boolean max) {
+        maxQuality = max;
+        if (trackSelector != null) trackSelector.setParameters(qualityParams());
+    }
+
+    /** Current picture size and the variants the stream offers, e.g. "1280x720 · варианты 720p 1080p*". */
+    String qualityInfo() {
+        if (player == null) return "-";
+        StringBuilder sb = new StringBuilder();
+        Format cur = player.getVideoFormat();
+        sb.append(cur != null ? cur.width + "x" + cur.height : "-");
+        if (cur != null && cur.bitrate > 0) sb.append(' ').append(cur.bitrate / 1000).append(" кбит/с");
+        sb.append(" · варианты:");
+        for (androidx.media3.common.Tracks.Group g : player.getCurrentTracks().getGroups()) {
+            if (g.getType() != C.TRACK_TYPE_VIDEO) continue;
+            for (int i = 0; i < g.length; i++) {
+                Format f = g.getTrackFormat(i);
+                sb.append(' ').append(f.height > 0 ? f.height + "p" : "?");
+                if (g.isTrackSelected(i)) sb.append('*');
+                if (!g.isTrackSupported(i)) sb.append("(не тянет)");
+            }
+        }
+        if (strictDecoder) sb.append(" · осторожный режим");
+        return sb.toString();
     }
 
     void stop() {
@@ -166,6 +222,7 @@ final class NativePlayer {
         @Override
         public void onVideoSizeChanged(VideoSize size) {
             fit(size);
+            listener.onQualityChanged();
         }
 
         @Override
@@ -180,6 +237,12 @@ final class NativePlayer {
             Throwable c = e.getCause();
             setState("ОШИБКА " + e.getErrorCodeName() + (c != null ? ": " + c : ""));
             if (player == null) return;
+            if (!strictDecoder && isDecoderError(e) && restartWithSameStream != null) {
+                // The hardware really can't do the top variant: restart within the box's own limits.
+                strictDecoder = true;
+                root.post(restartWithSameStream);
+                return;
+            }
             if (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
                 player.seekToDefaultPosition();
                 player.prepare();
@@ -197,6 +260,43 @@ final class NativePlayer {
             }
         }
     };
+
+    private static boolean isDecoderError(PlaybackException e) {
+        int c = e.errorCode;
+        return c == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
+                || c == PlaybackException.ERROR_CODE_DECODING_FAILED
+                || c == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED
+                || c == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES
+                || c == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED;
+    }
+
+    /**
+     * Cheap boxes under-report their hardware decoder (e.g. call 1080p "too much"), so the player would
+     * skip the best variants. Trust the hardware; a real decoder failure switches to strict mode.
+     */
+    private static final class TrustingRenderersFactory extends DefaultRenderersFactory {
+        TrustingRenderersFactory(Context context) {
+            super(context);
+            setEnableDecoderFallback(true);
+        }
+
+        @Override
+        protected void buildVideoRenderers(Context context, int extensionRendererMode,
+                androidx.media3.exoplayer.mediacodec.MediaCodecSelector selector, boolean enableDecoderFallback,
+                android.os.Handler eventHandler, androidx.media3.exoplayer.video.VideoRendererEventListener eventListener,
+                long allowedVideoJoiningTimeMs, java.util.ArrayList<androidx.media3.exoplayer.Renderer> out) {
+            out.add(new androidx.media3.exoplayer.video.MediaCodecVideoRenderer(context, selector,
+                    allowedVideoJoiningTimeMs, enableDecoderFallback, eventHandler, eventListener, 50) {
+                @Override
+                protected int supportsFormat(androidx.media3.exoplayer.mediacodec.MediaCodecSelector sel, Format format)
+                        throws androidx.media3.exoplayer.mediacodec.MediaCodecUtil.DecoderQueryException {
+                    int caps = super.supportsFormat(sel, format);
+                    if ((caps & 0b111) == C.FORMAT_EXCEEDS_CAPABILITIES) caps = (caps & ~0b111) | C.FORMAT_HANDLED;
+                    return caps;
+                }
+            });
+        }
+    }
 
     /** Keep the picture's aspect ratio: letterbox inside the screen instead of stretching. */
     private void fit(VideoSize size) {
