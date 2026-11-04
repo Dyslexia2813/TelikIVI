@@ -307,6 +307,7 @@ public class MainActivity extends Activity {
             session = null;
         }
         pageParked = true;
+        view.setVisibility(View.GONE); // its own drawing surface could cover our picture
         pointer.bringToFront();
         diag.bringToFront();
     }
@@ -318,6 +319,7 @@ public class MainActivity extends Activity {
         nativePlayer.stop();
         if (declined && was) nativeDeclined = true;
         if (pageParked) {
+            view.setVisibility(View.VISIBLE);
             pageParked = false;
             reopening = true;
             openSession();

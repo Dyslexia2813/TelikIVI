@@ -39,6 +39,7 @@ final class NativePlayer {
     private ExoPlayer player;
     private String state = "-";
     private int retries;
+    private boolean firstFrame;
     private Runnable retry;
 
     NativePlayer(Context context, FrameLayout root, Listener listener) {
@@ -73,7 +74,9 @@ final class NativePlayer {
         stop();
         retries = 0;
         surface = new SurfaceView(context);
-        surface.setBackgroundColor(Color.TRANSPARENT);
+        // The page engine draws on a surface of its own: keep ours on top of it.
+        surface.setZOrderMediaOverlay(true);
+        firstFrame = false;
         // Above the page, below the pointer and diagnostics.
         root.addView(surface, 1, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT, android.view.Gravity.CENTER));
@@ -106,10 +109,16 @@ final class NativePlayer {
                     .build());
         }
 
+        // Start at the best quality (1024x576 on ivi) instead of climbing up from the lowest one.
+        androidx.media3.exoplayer.upstream.DefaultBandwidthMeter meter =
+                new androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.Builder(context)
+                        .setInitialBitrateEstimate(20_000_000L)
+                        .build();
         player = new ExoPlayer.Builder(context,
                 new DefaultRenderersFactory(context).setEnableDecoderFallback(true),
                 new DefaultMediaSourceFactory(http))
                 .setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT)
+                .setBandwidthMeter(meter)
                 .build();
         player.setVideoSurfaceView(surface);
         player.addListener(events);
@@ -145,7 +154,8 @@ final class NativePlayer {
             if (s == Player.STATE_READY) {
                 retries = 0;
                 Format f = player.getVideoFormat();
-                setState("идёт" + (f != null ? " " + f.width + "x" + f.height : ""));
+                setState("идёт" + (f != null ? " " + f.width + "x" + f.height : "")
+                        + (firstFrame ? ", картинка есть" : ", картинки пока нет"));
             } else if (s == Player.STATE_BUFFERING) {
                 setState("буферизация");
             } else if (s == Player.STATE_ENDED) {
@@ -160,6 +170,7 @@ final class NativePlayer {
 
         @Override
         public void onRenderedFirstFrame() {
+            firstFrame = true;
             Format f = player != null ? player.getVideoFormat() : null;
             setState("идёт, картинка есть" + (f != null ? " " + f.width + "x" + f.height : ""));
         }

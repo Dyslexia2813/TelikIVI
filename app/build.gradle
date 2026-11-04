@@ -10,8 +10,8 @@ android {
         applicationId 'tv.telik.ivi'
         minSdk 21
         targetSdk 35
-        versionCode 9
-        versionName '0.9'
+        versionCode 10
+        versionName '0.10'
         // Only keep resources we actually ship (no extra translations from libraries).
         resourceConfigurations += ['ru', 'en']
         // The box is 32-bit ARM; one engine build instead of four keeps the APK much smaller.
