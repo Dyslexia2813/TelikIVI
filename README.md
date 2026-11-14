@@ -20,3 +20,5 @@
 Вход в аккаунт запоминается. При запуске сразу открывается канал «Живая природа» (https://www.ivi.ru/tvchannels/watch/zhivaya_priroda, нужна подписка ivi: один раз войти в аккаунт кнопкой «Войти» на сайте).
 
 APK собирается в GitHub Actions: вкладка Actions → последний запуск → артефакт `IVI-LiveNature-apk-<версия>` с файлом `IVI-LiveNature-<версия>.apk`.
+
+Документация для AI-агента (OpenCode): [`AGENTS.md`](AGENTS.md).
